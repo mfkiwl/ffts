@@ -7,7 +7,7 @@ set(FFTS_MAJOR 0)
 set(FFTS_MINOR 9)
 set(FFTS_MICRO 0)
 
-set(FFTS_VERSION "ffts-${FFTS_MAJOR}.${FFTS_MINOR}.${FFTS_MICRO}")
+set(FFTS_VERSION "${FFTS_MAJOR}.${FFTS_MINOR}.${FFTS_MICRO}")
 
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -22,6 +22,16 @@ set(INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/include/ffts)
 set(LIB_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/lib)
 
 # common options
+
+# !!!! FOR TESTING ONLY !!!!
+option(ENABLE_AVX
+  "Enables AVX instructions." OFF
+)
+# !!!! FOR TESTING ONLY !!!!
+option(ENABLE_DOUBLE
+  "Enables double precision" OFF
+)
+
 option(ENABLE_NEON
   "Enables the use of NEON instructions." OFF
 )
@@ -57,6 +67,7 @@ include(CheckSymbolExists)
 add_definitions(-DFFTS_BUILD)
 
 # check existence of various headers
+check_include_file(inttypes.h  HAVE_INTTYPES_H)
 check_include_file(malloc.h    HAVE_MALLOC_H)
 check_include_file(mm_malloc.h HAVE_MM_MALLOC_H)
 check_include_file(stdint.h    HAVE_STDINT_H)
@@ -64,6 +75,10 @@ check_include_file(stdlib.h    HAVE_STDLIB_H)
 check_include_file(string.h    HAVE_STRING_H)
 check_include_file(sys/mman.h  HAVE_SYS_MMAN_H)
 check_include_file(unistd.h    HAVE_UNISTD_H)
+
+if(HAVE_INTTYPES_H)
+  add_definitions(-DHAVE_INTTYPES_H)
+endif(HAVE_INTTYPES_H)
 
 if(HAVE_MALLOC_H)
   add_definitions(-DHAVE_MALLOC_H)
@@ -94,15 +109,10 @@ if(HAVE_UNISTD_H)
 endif(HAVE_UNISTD_H)
 
 # check existence of various declarations
-check_symbol_exists(aligned_alloc  stdlib.h HAVE_DECL_ALIGNED_ALLOC)
 check_symbol_exists(memalign       malloc.h HAVE_DECL_MEMALIGN)
 check_symbol_exists(posix_memalign stdlib.h HAVE_DECL_POSIX_MEMALIGN)
 check_symbol_exists(valloc         stdlib.h HAVE_DECL_VALLOC)
 check_symbol_exists(_mm_malloc     malloc.h HAVE_DECL__MM_MALLOC)
-
-if(HAVE_DECL_ALIGNED_ALLOC)
-  add_definitions(-DHAVE_DECL_ALIGNED_ALLOC)
-endif(HAVE_DECL_ALIGNED_ALLOC)
 
 if(HAVE_DECL_MEMALIGN)
   add_definitions(-DHAVE_DECL_MEMALIGN)
@@ -121,15 +131,10 @@ if(HAVE_DECL__MM_MALLOC)
 endif(HAVE_DECL__MM_MALLOC)
 
 # check existence of various functions
-check_function_exists(aligned_alloc  HAVE_ALIGNED_ALLOC)
 check_function_exists(memalign       HAVE_MEMALIGN)
 check_function_exists(posix_memalign HAVE_POSIX_MEMALIGN)
 check_function_exists(valloc         HAVE_VALLOC)
 check_function_exists(_mm_malloc     HAVE__MM_MALLOC)
-
-if(HAVE_ALIGNED_ALLOC)
-  add_definitions(-DHAVE_ALIGNED_ALLOC)
-endif(HAVE_ALIGNED_ALLOC)
 
 if(HAVE_MEMALIGN)
   add_definitions(-DHAVE_MEMALIGN)
@@ -307,6 +312,14 @@ if(NOT CMAKE_CROSSCOMPILING)
     if(HAVE_XMMINTRIN_H)
       add_definitions(-DHAVE_SSE)
       set(CMAKE_REQUIRED_FLAGS_SAVE ${CMAKE_REQUIRED_FLAGS})
+
+      # TODO: not the right place
+      if(ENABLE_AVX)
+        add_definitions(-DHAVE_AVX)
+      endif(ENABLE_AVX)
+      if(ENABLE_DOUBLE)
+        add_definitions(-DFFTS_DOUBLE)
+      endif(ENABLE_DOUBLE)
     endif(HAVE_XMMINTRIN_H)
 
     # enable SSE2 code generation
@@ -414,6 +427,8 @@ set(FFTS_SOURCES
   src/ffts.c
   src/ffts_chirp_z.c
   src/ffts_chirp_z.h
+  src/ffts_cpu.c
+  src/ffts_cpu.h
   src/ffts_internal.h
   src/ffts_nd.c
   src/ffts_nd.h
@@ -431,6 +446,17 @@ set(FFTS_SOURCES
   src/patterns.h
   src/types.h
 )
+
+if(NOT DISABLE_DYNAMIC_CODE)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64.*|x86_64.*|AMD64.*")
+    list(APPEND FFTS_SOURCES
+      src/codegen_sse.h
+    )
+  else()
+    message(WARNING "Dynamic code is only supported with x64, disabling dynamic code.")
+    set(DISABLE_DYNAMIC_CODE ON)
+  endif(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64.*|x86_64.*|AMD64.*")
+endif(NOT DISABLE_DYNAMIC_CODE)
 
 if(ENABLE_NEON)
   list(APPEND FFTS_SOURCES
@@ -456,19 +482,9 @@ elseif(HAVE_XMMINTRIN_H)
   add_definitions(-DHAVE_SSE)
 
   list(APPEND FFTS_SOURCES
+    src/macros-avx.h
     src/macros-sse.h
   )
-
-  if(NOT DISABLE_DYNAMIC_CODE)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-      list(APPEND FFTS_SOURCES
-        src/codegen_sse.h
-      )
-    else()
-      message(WARNING "Dynamic code is only supported with x64, disabling dynamic code.")
-      set(DISABLE_DYNAMIC_CODE ON)
-    endif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-  endif(NOT DISABLE_DYNAMIC_CODE)
 endif(ENABLE_NEON)
 
 if(DISABLE_DYNAMIC_CODE)
@@ -515,6 +531,41 @@ if(ENABLE_STATIC)
 endif(ENABLE_STATIC)
 
 if(ENABLE_STATIC OR ENABLE_SHARED)
+  find_path(MPFR_INCLUDES
+    NAMES mpfr.h
+    PATHS ${INCLUDE_INSTALL_DIR}
+  )
+  find_library(MPFR_LIBRARIES mpfr PATHS ${LIB_INSTALL_DIR})
+  find_package(OpenMP)
+
+  if(MPFR_INCLUDES)
+    add_definitions(-DHAVE_MPFR_H)
+    include_directories(${MPFR_INCLUDES})
+  endif(MPFR_INCLUDES)
+
+  add_executable(ffts_trig_test
+    tests/trig_test.c
+  )
+
+  target_link_libraries(ffts_trig_test ffts)
+  if(MPFR_LIBRARIES)
+    target_link_libraries(ffts_trig_test ${MPFR_LIBRARIES})
+  endif(MPFR_LIBRARIES)
+
+  if(OPENMP_FOUND)
+    if(MSVC)
+      set_target_properties(ffts_trig_test PROPERTIES
+        COMPILE_FLAGS "${OpenMP_C_FLAGS}"
+        LINK_FLAGS "${OpenMP_EXE_LINKER_FLAGS}"
+      )
+    else()
+      set_target_properties(ffts_trig_test PROPERTIES
+        COMPILE_FLAGS "${OpenMP_C_FLAGS}"
+        LINK_FLAGS "${OpenMP_C_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}"
+      )
+    endif(MSVC)
+  endif(OPENMP_FOUND)
+
   add_executable(ffts_test
     tests/test.c
   )
@@ -530,6 +581,14 @@ if(ENABLE_STATIC OR ENABLE_SHARED)
     ffts
     ${FFTS_EXTRA_LIBRARIES}
   )
+
+  add_executable(ffts_cpu_test
+    src/ffts_cpu.c
+    src/ffts_cpu.h
+    tests/cpu_test.c
+  )
+
+  set_target_properties(ffts_cpu_test PROPERTIES COMPILE_DEFINITIONS FFTS_BUILDING_CPU_TEST)
 endif(ENABLE_STATIC OR ENABLE_SHARED)
 
 # generate packageconfig file
